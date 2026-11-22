@@ -1,0 +1,21 @@
+# Arquivos que podem ser publicados no GitHub.
+#
+# Nada derivado da ROM do jogo entra no repositório: nem os chips extraídos, nem
+# o código gerado a partir deles, nem a biblioteca compilada, nem capturas.
+#
+README.md
+build.sh
+licenses/FBNeo.txt
+aot/generate.py
+board/build.py
+board/zeroteam_board.cpp
+board/standalone.cpp
+frontend/Makefile
+frontend/main.cpp
+frontend/progress.hpp
+frontend/board_progress.inc
+frontend/jogar.sh
+frontend/zeroteam_board.h
+tools/prepare_chips.py
+tools/verify_board.py
+tools/probe.cpp
