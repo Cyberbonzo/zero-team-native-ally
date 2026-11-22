@@ -9,7 +9,8 @@ são específicos deste título; a compilação usa a ROM do próprio jogador.
 ## Jogar no Ally
 
 O atalho **Zero Team USA** está na biblioteca da Steam. A instalação fica em
-`~/Games/ZeroTeam-Native` e o jogo ocupa a tela de 1920×1080 do Ally com a
+`~/Games/ZeroTeam-Native` (NVMe interno; o cartão microSD estava somente
+leitura no dia da instalação) e o jogo ocupa a tela de 1920×1080 do Ally com a
 imagem em 4:3 centralizada e barras pretas nas laterais — o mesmo enquadramento
 do gabinete, sem esticar os personagens.
 
