@@ -14,6 +14,7 @@ compares them frame by frame:
 import argparse
 import concurrent.futures
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -82,6 +83,55 @@ def assemble(source):
     return out
 
 
+WIDESCREEN = True
+
+
+def patch_widescreen(code, margin=54):
+    """Widen the Zero Team renderer from 320 to 320 + 2*margin columns.
+
+    The driver already walks the full 512px tile maps and the 512px sprite
+    space, and clips to nScreenWidth. So a 16:9 view needs a wider surface, the
+    extra columns on both sides (320 + 2*54 = 428), and the fixed text layer
+    kept to its original 40 columns so the HUD stays centred.
+
+    The shift is constant rather than clamped at the level edge: the game also
+    composes fixed 320-wide screens (title, character select) out of sprites, and
+    a centred shift keeps those centred. Clamping would leave them flush left.
+    """
+    replacements = [
+        # Surface allocation for the 32bpp composition buffer.
+        ("Next += 320 * 256 * sizeof(UINT32);",
+         "Next += ZT_SCREEN_WIDTH * ZT_SCREEN_HEIGHT * sizeof(UINT32);"),
+        # Tile layers: wrap the 512px world at the new left edge, then shift.
+        ("if (sx < -15) sx += 512;",
+         f"if (sx < -15 - {margin}) sx += 512;\n\t\tsx += {margin};"),
+        # Fixed text layer: keep the original 40 columns, centred in the view.
+        ("INT32 sx = (offs & 0x3f) * 8;",
+         f"if ((offs & 0x3f) >= 40) continue;\n"
+         f"\t\tINT32 sx = ((offs & 0x3f) * 8) + {margin};"),
+        # Sprites live in the same space as the tile maps and the fixed screens.
+        ("if (sx < -15 || sy < -15 || sy >= nScreenHeight || sx >= nScreenWidth) return;",
+         f"sx += {margin};\n\tif (sx < -15 || sy < -15 || sy >= nScreenHeight ||"
+         f" sx >= nScreenWidth) return;"),
+    ]
+    for before, after in replacements:
+        if code.count(before) != 1:
+            raise SystemExit(f"unexpected driver source for widescreen patch: {before!r}")
+        code = code.replace(before, after)
+    # The driver's visible size drives GenericTilesInit and the composition
+    # loops, so the single supported title is declared at the wider geometry.
+    marker = "struct BurnDriver BurnDrvZeroteam = {"
+    start = code.index(marker)
+    end = code.index("\n};", start)
+    block = code[start:end]
+    if block.count("\t320, 256, 4, 3") != 1:
+        raise SystemExit("unexpected BurnDrvZeroteam geometry")
+    block = block.replace("\t320, 256, 4, 3",
+                          "\tZT_SCREEN_WIDTH, ZT_SCREEN_HEIGHT, 16, 9")
+    code = code[:start] + block + code[end:]
+    return code
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--aot", action="store_true",
@@ -101,9 +151,19 @@ static const struct {const char *game_name; char *sourcefile;} sourcefile_table[
     # The driver keeps every Seibu title of the family in one file. The board
     # only needs the Zero Team paths; a private copy exposes the program image
     # so the build can prove that the generated translation matches the bytes
-    # the driver assembles from the chips.
+    # the driver assembles from the chips, and carries the 16:9 geometry.
+    header = (HERE.parent / "frontend/zeroteam_board.h").read_text()
+    width = int(re.search(r"ZT_WIDTH = (\d+)", header).group(1))
+    height = int(re.search(r"ZT_HEIGHT = (\d+)", header).group(1))
+    margin = int(re.search(r"ZT_WIDE_MARGIN = (\d+)", header).group(1))
+    if width != 320 + 2 * margin:
+        raise SystemExit(f"ZT_WIDTH {width} is not 320 plus two {margin}-column margins")
     driver = (SRC / "burn/drv/pst90s/d_raiden2.cpp").read_text()
-    update(GEN / "d_raiden2.cpp", driver + """
+    if WIDESCREEN:
+        driver = patch_widescreen(driver, margin)
+    geometry = (f"// Generated: geometry shared with frontend/zeroteam_board.h.\n"
+                f"#define ZT_SCREEN_WIDTH {width}\n#define ZT_SCREEN_HEIGHT {height}\n\n")
+    update(GEN / "d_raiden2.cpp", geometry + driver + """
 extern "C" UINT8 *zt_main_rom_ptr(void) { return DrvMainROM; }
 """)
 

@@ -8,12 +8,14 @@
 extern "C" {
 #endif
 
-/* Zero Team runs on a 320x256 raster that the arcade cabinet displayed as a
- * 4:3 picture. The port keeps that geometry: 320 columns, 256 lines, and the
- * 4:3 aspect is restored by the frontend when it scales to the panel. */
+/* The board renders a 16:9 view: the cabinet's 320x256 raster plus 54 extra
+ * columns of world on each side, which the renderer reads from the same 512px
+ * tile maps and sprite space. The frontend scales those 428 columns to the
+ * panel, so the picture fills a 1920x1080 screen without distortion. */
 enum {
-    ZT_WIDTH = 320,
+    ZT_WIDTH = 428,
     ZT_HEIGHT = 256,
+    ZT_WIDE_MARGIN = 54,
     ZT_AUDIO_RATE = 48000,
     ZT_MAX_AUDIO_FRAMES = 2048
 };

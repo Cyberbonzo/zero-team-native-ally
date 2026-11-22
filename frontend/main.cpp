@@ -23,23 +23,28 @@ struct Options {
     fs::path assets, saves, capture;
     unsigned frames = 0;
     unsigned present_hz = 60;
+    int display = -1;   // -1 selects the external panel when one is attached
     bool headless = false;
     bool stretch = false;
     bool windowed = false;
+    bool pillarbox = false;
     bool help = false;
 };
 
 static const char *usage =
     "Usage: zeroteam [--assets DIR] [--saves DIR] [--headless --frames N]\n"
-    "                [--capture FILE.bmp] [--present-hz N] [--stretch] [--windowed]\n"
+    "                [--capture FILE.bmp] [--present-hz N] [--display N]\n"
+    "                [--stretch] [--windowed]\n"
     "  --assets DIR     game data (default: ./assets next to the executable)\n"
     "  --saves DIR      save-state folder (default: ./saves next to the executable)\n"
     "  --headless       no video/audio device; requires --frames N\n"
     "  --frames N       stop after N board frames\n"
-    "  --capture FILE   write the last board frame as a 320x256 BMP\n"
+    "  --capture FILE   write the last board frame as a 428x256 BMP\n"
     "  --present-hz N   display cadence in Hz (default 60)\n"
-    "  --stretch        fill the panel, ignoring the 4:3 aspect (default off)\n"
-    "  --windowed       run in a 1280x960 window instead of fullscreen\n";
+    "  --display N      display to open fullscreen on: 0, 1, ... or auto (default)\n"
+    "  --stretch        fill the panel even on a non 16:9 screen\n"
+    "  --pillarbox      crop to the arcade's 320 columns, shown as 4:3\n"
+    "  --windowed       run in a 1280x720 window instead of fullscreen\n";
 
 /** Directory holding the executable, so the defaults work from any cwd. */
 static fs::path executable_dir() {
@@ -72,10 +77,16 @@ static Options parse(int argc, char **argv) {
         else if (key == "--saves") opt.saves = value();
         else if (key == "--capture") opt.capture = value();
         else if (key == "--present-hz") opt.present_hz = number(key, value(), 1, 1000);
+        else if (key == "--display") {
+            const std::string argument = value();
+            opt.display = argument == "auto" ? -1
+                                             : static_cast<int>(number(key, argument, 0, 15));
+        }
         else if (key == "--frames") opt.frames = number(key, value(), 1, UINT32_MAX);
         else if (key == "--headless") opt.headless = true;
         else if (key == "--stretch") opt.stretch = true;
         else if (key == "--windowed") opt.windowed = true;
+        else if (key == "--pillarbox") opt.pillarbox = true;
         else if (key == "--help" || key == "-h") opt.help = true;
         else throw std::runtime_error("Unknown option: " + key + "\n" + usage);
     }
@@ -122,25 +133,55 @@ struct Devices {
         }
     }
 
-    void open(bool windowed) {
+    void open(bool windowed, int display) {
         SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "nearest");
-        SDL_DisplayMode mode{};
-        if (SDL_GetDesktopDisplayMode(0, &mode) != 0) {
-            mode.w = 1920;
-            mode.h = 1080;
+        const int displays = SDL_GetNumVideoDisplays();
+        int index = display;
+        if (index < 0) {
+            // The handheld panel is display 0, so a second display is an
+            // external output (HDMI/USB-C). Under Game Mode gamescope exposes
+            // the display it is driving as the only one, which is exactly the
+            // panel the game should fill.
+            index = displays > 1 ? 1 : 0;
+            if (displays > 1)
+                std::fprintf(stderr, "Display auto: external output (%d of %d)\n", index,
+                             displays);
         }
+        if (displays <= 0 || index >= displays) {
+            std::fprintf(stderr, "Display %d unavailable (%d found), using 0\n", index, displays);
+            index = 0;
+        }
+        SDL_DisplayMode desktop{};
+        if (SDL_GetDesktopDisplayMode(index, &desktop) != 0) {
+            desktop.w = 1920;
+            desktop.h = 1080;
+        }
+        SDL_Rect bounds{0, 0, desktop.w, desktop.h};
+        SDL_GetDisplayBounds(index, &bounds);
         if (windowed) {
-            window = SDL_CreateWindow(title, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-                                      1280, 960, SDL_WINDOW_RESIZABLE);
+            window = SDL_CreateWindow(title, bounds.x + (bounds.w - 1280) / 2,
+                                      bounds.y + (bounds.h - 720) / 2, 1280, 720,
+                                      SDL_WINDOW_RESIZABLE);
         } else {
             // On the handheld the Gamescope XWayland desktop ignores the
             // fullscreen flag while the window is being created, so the window
-            // starts at the panel size and is promoted afterwards. If the
-            // compositor still refuses, it stays borderless over the panel.
-            window = SDL_CreateWindow(title, 0, 0, mode.w, mode.h,
+            // starts at the display size and is promoted afterwards. A real
+            // 1920x1080 mode is requested when the panel offers one, so the
+            // output is 1080p on an external display too.
+            window = SDL_CreateWindow(title, bounds.x, bounds.y, bounds.w, bounds.h,
                                       SDL_WINDOW_BORDERLESS | SDL_WINDOW_ALLOW_HIGHDPI);
             if (!window) sdl_error("Window");
-            if (SDL_SetWindowFullscreen(window, SDL_WINDOW_FULLSCREEN_DESKTOP) != 0)
+            bool exclusive = false;
+            if (desktop.w != 1920 || desktop.h != 1080) {
+                SDL_DisplayMode want{SDL_PIXELFORMAT_UNKNOWN, 1920, 1080, 0, nullptr};
+                SDL_DisplayMode closest{};
+                if (SDL_GetClosestDisplayMode(index, &want, &closest) && closest.w == 1920 &&
+                    closest.h == 1080) {
+                    exclusive = SDL_SetWindowDisplayMode(window, &closest) == 0 &&
+                                SDL_SetWindowFullscreen(window, SDL_WINDOW_FULLSCREEN) == 0;
+                }
+            }
+            if (!exclusive && SDL_SetWindowFullscreen(window, SDL_WINDOW_FULLSCREEN_DESKTOP) != 0)
                 std::fprintf(stderr, "Fullscreen request refused: %s\n", SDL_GetError());
         }
         if (!window) sdl_error("Window");
@@ -154,10 +195,13 @@ struct Devices {
 #if SDL_VERSION_ATLEAST(2, 0, 12)
         if (SDL_SetTextureScaleMode(texture, SDL_ScaleModeNearest) != 0) sdl_error("Texture filter");
 #endif
-        int window_w = 0, window_h = 0;
+        int window_w = 0, window_h = 0, output_w = 0, output_h = 0;
         SDL_GetWindowSize(window, &window_w, &window_h);
-        std::fprintf(stderr, "Window: %dx%d, desktop %dx%d, video driver %s\n", window_w,
-                     window_h, mode.w, mode.h, SDL_GetCurrentVideoDriver());
+        SDL_GetRendererOutputSize(renderer, &output_w, &output_h);
+        std::fprintf(stderr,
+                     "Window: %dx%d, output %dx%d, display %d %dx%d, video driver %s\n",
+                     window_w, window_h, output_w, output_h, index, bounds.w, bounds.h,
+                     SDL_GetCurrentVideoDriver());
         for (int i = 0; i < SDL_NumJoysticks(); ++i) add_pad(i);
         if (SDL_InitSubSystem(SDL_INIT_AUDIO) == 0) {
             SDL_AudioSpec want{};
@@ -206,22 +250,30 @@ struct Devices {
         if (SDL_UpdateTexture(texture, nullptr, pixels, ZT_WIDTH * 4) < 0) sdl_error("Texture update");
     }
 
-    void present(bool paused, bool stretch) {
+    void present(bool paused, bool stretch, bool pillarbox) {
         int width, height;
         if (SDL_GetRendererOutputSize(renderer, &width, &height) < 0) sdl_error("Display size");
-        // The 320x256 raster was shown as a 4:3 picture on the cabinet monitor.
-        // Fit the largest 4:3 rectangle inside the panel; the remaining side
-        // columns are the black pillarbox bars. --stretch fills the panel.
+        // The board renders a 16:9 view (428x256 of world), so on a 16:9 panel
+        // the picture fills the whole screen. Other panel shapes get a
+        // letterboxed 16:9 rectangle, and --stretch fills them instead.
+        // --pillarbox crops back to the arcade's 320 columns and shows them as
+        // the cabinet's 4:3 picture.
+        SDL_Rect src{0, 0, ZT_WIDTH, ZT_HEIGHT};
         SDL_Rect dest{0, 0, width, height};
-        if (!stretch) {
+        if (pillarbox) {
+            src = SDL_Rect{(ZT_WIDTH - 320) / 2, 0, 320, ZT_HEIGHT};
             int h = std::min(height, width * 3 / 4);
             int w = h * 4 / 3;
+            dest = SDL_Rect{(width - w) / 2, (height - h) / 2, w, h};
+        } else if (!stretch) {
+            int h = std::min(height, width * 9 / 16);
+            int w = h * 16 / 9;
             dest = SDL_Rect{(width - w) / 2, (height - h) / 2, w, h};
         }
         SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
         SDL_RenderClear(renderer);
         SDL_RenderSetClipRect(renderer, &dest);
-        SDL_RenderCopy(renderer, texture, nullptr, &dest);
+        SDL_RenderCopy(renderer, texture, &src, &dest);
         SDL_RenderSetClipRect(renderer, nullptr);
         if (paused) {
             SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
@@ -254,9 +306,11 @@ static int run(const Options &opt) {
                  title, ZT_WIDTH, ZT_HEIGHT, fps, ZT_AUDIO_RATE);
     Devices devices;
     if (!opt.headless) {
-        devices.open(opt.windowed);
+        devices.open(opt.windowed, opt.display);
         std::fprintf(stderr, "Present: %u Hz cadence, %s\n", opt.present_hz,
-                     opt.stretch ? "stretched to fill the panel" : "4:3 centred with pillarbox bars");
+                     opt.pillarbox ? "arcade 4:3 centred with pillarbox bars"
+                                   : (opt.stretch ? "16:9 view stretched to fill the panel"
+                                                  : "16:9 view filling a 16:9 panel"));
     }
     Progress progress;
     progress.open(opt.saves);
@@ -346,7 +400,7 @@ static int run(const Options &opt) {
                 } else {
                     ++duplicated;
                 }
-                devices.present(paused, opt.stretch);
+                devices.present(paused, opt.stretch, opt.pillarbox);
                 ++presents;
                 present_deadline += present_period;
                 if (now - present_deadline > present_period) {
@@ -368,7 +422,7 @@ static int run(const Options &opt) {
         }
         if (dirty) {
             devices.upload(pixels.data());
-            devices.present(paused, opt.stretch);
+            devices.present(paused, opt.stretch, opt.pillarbox);
             ++presents;
         }
     }

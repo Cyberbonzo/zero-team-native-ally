@@ -10,9 +10,9 @@ são específicos deste título; a compilação usa a ROM do próprio jogador.
 
 O atalho **Zero Team USA** está na biblioteca da Steam. A instalação fica em
 `~/Games/ZeroTeam-Native` (NVMe interno; o cartão microSD estava somente
-leitura no dia da instalação) e o jogo ocupa a tela de 1920×1080 do Ally com a
-imagem em 4:3 centralizada e barras pretas nas laterais — o mesmo enquadramento
-do gabinete, sem esticar os personagens.
+leitura no dia da instalação). O jogo ocupa os 1920×1080 do Ally **sem
+esticar**: o renderizador passou a ler 428 colunas de mundo (as 320 do gabinete
+mais 54 de cada lado) e a frente estica essa imagem para a tela inteira.
 
 | Ação | ROG Ally | Teclado |
 |---|---|---|
@@ -27,6 +27,13 @@ A lógica roda na cadência original do arcade (55,47 Hz) e a apresentação sai
 60 Hz, repetindo o quadro quando não há um novo. Assim a velocidade do jogo não
 muda e a imagem não trava. O log em `logs/game.log` mostra, ao encerrar, a média
 de quadros da lógica e da apresentação, além de quantos foram repetidos.
+
+**Tela interna e saída externa.** A frente abre na saída externa quando existe
+uma (HDMI/USB-C) e no painel do aparelho quando não existe; `--display N` força
+uma tela específica e `--display auto` é o padrão. Em ambos os casos ela pede um
+modo de 1920×1080 quando a tela oferece um, para a saída ser 1080p também fora
+do aparelho. `--pillarbox` recorta as 320 colunas originais e mostra em 4:3,
+com barras, para quem preferir o enquadramento exato do gabinete.
 
 Este build não tem save-state: o jogo não grava progresso próprio, e o suporte a
 estado salvo ainda não foi implementado nem verificado.
@@ -68,6 +75,21 @@ jogador. As condições de uso do código do FBNeo estão em
 [licenses/FBNeo.txt](licenses/FBNeo.txt). [Fontes dos dispositivos na revisão
 usada](https://github.com/finalburnneo/FBNeo/tree/61cd3ede225ec44b84011f7679db68123d72725d).
 
+## Campo de visão 16:9
+
+A placa desenha os tilemaps e os sprites de um mundo de 512 px e recortava tudo
+em 320 colunas. Para o campo 16:9 o recorte passou a 428 colunas e as camadas
+receberam um deslocamento de 54 px, então a janela mostra 54 px de mundo a mais
+de cada lado. A camada de texto fixa (placar, tempo, avisos) continua com as suas
+40 colunas centradas, e nada do miolo muda: o centro de 320 colunas da imagem
+16:9 é **byte a byte idêntico** ao quadro 4:3 do mesmo instante.
+
+**Limite conhecido.** O mundo tem 512 px e o jogo escreve apenas a janela que o
+gabinete mostrava. No começo de cada fase, e nas telas fixas (título, seleção de
+personagem), as colunas extras podem cair fora da área desenhada do mapa e
+aparecer escuras; essas telas também são composições de 320 px, então ficam
+centralizadas com barras. Para o enquadramento original existe `--pillarbox`.
+
 ## Verificação
 
 O build compara duas placas construídas dos mesmos fontes com as mesmas opções:
@@ -76,9 +98,9 @@ recebem o mesmo roteiro de entradas e precisam coincidir em **todos** os quadros
 e blocos de áudio, não só no último:
 
 ```text
-frames=1200 video=28f53a4a8ed23dda/28f53a4a8ed23dda
+frames=1200 video=e18569259fdaa2c1/e18569259fdaa2c1
              audio=0eafaed49d1d6063/0eafaed49d1d6063
-             capture=9b3edf74fba0c91f/9b3edf74fba0c91f sites=917504 fallback=0
+             capture=e5e436cfe863a8de/e5e436cfe863a8de sites=917504 fallback=0
              => identical
 ```
 
@@ -86,11 +108,11 @@ frames=1200 video=28f53a4a8ed23dda/28f53a4a8ed23dda
 programa executado passou pelo código traduzido.
 
 No ROG Ally com Bazzite, o atalho da Steam abriu o jogo em uma janela de
-1920×1080, o SDL reconheceu o controle Xbox e o crédito e o start funcionaram.
-A medição de 30 s de partida deu lógica a 55,50 fps e apresentação a 60,04 fps,
-com 71 quadros repetidos e nenhum descartado. A tradução executou 3.000 quadros
-em 3,74 s na máquina de compilação (~800 quadros por segundo), muito acima da
-cadência necessária.
+1920×1080 com a saída também em 1920×1080, o SDL reconheceu o controle Xbox e o
+crédito e o start funcionaram. Uma medição de 30 s de jogo deu lógica a
+55,49 fps e apresentação a 60,03 fps, com 134 quadros repetidos e nenhum
+descartado. A tradução executou 3.000 quadros em 3,74 s na máquina de compilação
+(~800 quadros por segundo), muito acima da cadência necessária.
 
 O inventário do ZIP interno foi produzido pelo REA 6.10.1, evidência
 `ev_ab6170b4dcf68263617bfb00ac35e187e1a8d3b6176378b06b714623eea0b808`. A
