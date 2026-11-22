@@ -132,11 +132,65 @@ def patch_widescreen(code, margin=54):
     return code
 
 
+def patch_scroll_trace(code):
+    """Log every scroll-register write with the guest PC that issued it.
+
+    Diagnostic only: it turns the camera routine into a handful of addresses
+    that can be disassembled, instead of guessing from a linear sweep of a
+    variable-length instruction set.
+    """
+    marker = "\t\tscroll[offset & 0x0f] = data;\n"
+    if code.count(marker) != 1:
+        raise SystemExit("unexpected scroll write site")
+    code = code.replace(marker, marker +
+                        "\t\tstatic int trace = -1;\n"
+                        "\t\tif (trace < 0) trace = getenv(\"ZT_TRACE_SCR\") ? 1 : 0;\n"
+                        "\t\tif (trace)\n"
+                        "\t\t\tfprintf(stderr, \"SCR reg=%d val=%04x pc=%05x\\n\",\n"
+                        "\t\t\t        offset & 0x0f, data, VezGetPC(-1) & 0xfffff);\n")
+    return code
+
+
+def patch_store_watch(code, address):
+    """Route writes to one RAM word through the handler and log the store PC.
+
+    Sampling after an instruction cannot tell which store changed memory, and
+    the translated dispatch runs one guest instruction at a time, so the write
+    handler is the only place where the guest PC is exact.
+    """
+    marker = ("static void __fastcall zeroteam_main_write(UINT32 address, UINT8 data)\n"
+              "{\n")
+    if code.count(marker) != 1:
+        raise SystemExit("unexpected zeroteam_main_write definition")
+    hook = (marker +
+            f"\tif (address == {address:#x} || address == {address + 1:#x}) {{\n"
+            "\t\tstatic int trace = -1;\n"
+            "\t\tif (trace < 0) trace = getenv(\"ZT_WATCH_STORE\") ? 1 : 0;\n"
+            "\t\tif (trace)\n"
+            "\t\t\tfprintf(stderr, \"WS pc=%05x a=%03x v=%02x\\n\",\n"
+            "\t\t\t        VezGetPC(-1) & 0xfffff, address, data);\n"
+            "\t}\n")
+    code = code.replace(marker, hook)
+    map_marker = "\tVezSetWriteHandler(zeroteam_main_write);"
+    if code.count(map_marker) != 1:
+        raise SystemExit("unexpected write handler registration")
+    page_start = address & ~0x1ff
+    page_end = (address | 0x1ff)
+    code = code.replace(map_marker, map_marker +
+                        f"\n\tVezMemCallback({page_start:#x}, {page_end:#x}, 1);"
+                        " // watch one word through the handler")
+    return code
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--aot", action="store_true",
                         help="link the generated V30 translation instead of the interpreter")
     parser.add_argument("--lib", default="libzeroteam_board.so")
+    parser.add_argument("--trace-scroll", action="store_true",
+                        help="diagnostic: log scroll writes with the guest PC")
+    parser.add_argument("--watch-store", metavar="ADDR",
+                        help="diagnostic: route writes to one RAM word through the handler")
     args = parser.parse_args()
 
     OBJ.mkdir(exist_ok=True, parents=True)
@@ -161,10 +215,23 @@ static const struct {const char *game_name; char *sourcefile;} sourcefile_table[
     driver = (SRC / "burn/drv/pst90s/d_raiden2.cpp").read_text()
     if WIDESCREEN:
         driver = patch_widescreen(driver, margin)
+    if args.trace_scroll:
+        driver = patch_scroll_trace(driver)
+    if args.watch_store:
+        driver = patch_store_watch(driver, int(args.watch_store, 16))
     geometry = (f"// Generated: geometry shared with frontend/zeroteam_board.h.\n"
                 f"#define ZT_SCREEN_WIDTH {width}\n#define ZT_SCREEN_HEIGHT {height}\n\n")
     update(GEN / "d_raiden2.cpp", geometry + driver + """
 extern "C" UINT8 *zt_main_rom_ptr(void) { return DrvMainROM; }
+
+// Diagnostics used by the tools while investigating the camera and the sprite
+// list; they are not part of the board interface the frontend uses. The board
+// is built with hidden visibility, so these need an explicit export.
+#define ZT_EXPORT extern "C" __attribute__((visibility("default")))
+ZT_EXPORT UINT8 *zt_scroll_ptr(void) { return scroll; }
+ZT_EXPORT UINT8 *zt_spr_ram_ptr(void) { return DrvSprRAM; }
+ZT_EXPORT UINT16 zt_spr_cur_start(void) { return sprites_cur_start; }
+ZT_EXPORT UINT8 *zt_main_ram_ptr(void) { return DrvMainRAM; }
 """)
 
     sources = [SRC / s for s in SOURCE_FILES]

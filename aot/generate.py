@@ -120,17 +120,47 @@ def write_sites(program, table, out):
     return used, count
 
 
-def write_dispatch(table, used, out):
+def write_dispatch(table, used, out, watch=None):
     entries = []
     for opcode in range(256):
         name = table[opcode]
         entries.append(f"    (const void *)(void (*)(void)){name},")
+    watch_code = ""
+    if watch is not None:
+        watch_code = f"""
+// Diagnostic: report the instruction that writes guest RAM at {watch:#06x}, so a
+// clamp can be located without a disassembler for the whole program.
+extern "C" UINT8 *zt_main_ram_ptr(void);
+static unsigned zt_watch_addr = {watch:#x};
+static unsigned zt_watch_value;
+static int zt_watch_ready;
+static long zt_watch_reports;
+"""
+    after_call = ""
+    if watch is not None:
+        after_call = """
+    if (!zt_watch_ready) {
+        const UINT8 *ram = zt_main_ram_ptr();
+        zt_watch_value = ram[zt_watch_addr] | (ram[zt_watch_addr + 1] << 8);
+        zt_watch_ready = 1;
+    } else {
+        const UINT8 *ram = zt_main_ram_ptr();
+        const unsigned now = ram[zt_watch_addr] | (ram[zt_watch_addr + 1] << 8);
+        if (now != zt_watch_value) {
+            if (zt_watch_reports++ < 4000)
+                fprintf(stderr, "WATCH pc=%05x val=%d\\n", linear, (int)now);
+            zt_watch_value = now;
+        }
+    }
+"""
     body = f"""// Generated: V30 opcode handlers and the translated dispatch.
 // Included by nec_aot.cpp, where the handler bodies are in scope.
+#include <stdio.h>
+#include <stdlib.h>
 extern "C" {{
 extern const unsigned char zt_sites[];
 }}
-
+{watch_code}
 const void *zt_handlers[256] = {{
 {chr(10).join(entries)}
 }};
@@ -156,7 +186,7 @@ static void zt_aot_dispatch(nec_state_t *nec_state)
         zt_fallback_hits++;
         nec_instruction[cpu_readop(linear ^ nec_state->fetch_xor)](nec_state);
     }}
-}}
+{after_call}}}
 """
     (out / "zt_dispatch.inc").write_text(body)
     return used
@@ -181,6 +211,7 @@ def main():
     parser.add_argument("--chips", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--expect", help="expected SHA-256 of the program image")
+    parser.add_argument("--watch", help="diagnostic: report writers of this RAM address (hex)")
     args = parser.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
 
@@ -192,7 +223,7 @@ def main():
 
     table = parse_handlers(args.fbneo / "src/cpu/nec/necinstr.h")
     used, count = write_sites(program, table, args.out)
-    write_dispatch(table, used, args.out)
+    write_dispatch(table, used, args.out, int(args.watch, 16) if args.watch else None)
     patch_core(args.fbneo / "src/cpu/nec/nec.cpp", args.out)
 
     reset_ip, reset_cs = struct.unpack_from("<HH", program, 0xFFFF0)

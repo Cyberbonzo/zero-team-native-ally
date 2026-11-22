@@ -24,6 +24,7 @@ extern BurnDriver BurnDrvZeroteam;
 // Exposed by the private copy of the driver so the build can compare the
 // program image it translated against the one the driver assembles.
 extern "C" UINT8 *zt_main_rom_ptr(void);
+extern "C" UINT8 *zt_main_ram_ptr(void);
 
 // Provided by the generated V30 translation, or stubbed for reference builds.
 #ifndef ZEROTEAM_AOT
@@ -172,6 +173,33 @@ double zt_fps(void) { return nBurnFPS / 100.0; }
 
 int zt_frame(uint32_t *pixels, int16_t *stereo, unsigned p1, unsigned p2) {
     if (!active || !pixels || !stereo) return -1;
+    // Diagnostic: hold words in main RAM at caller-chosen values, which is how
+    // the investigation located the game's own screen-width constant.
+    struct Poke { unsigned address; unsigned value; };
+    static std::vector<Poke> pokes;
+    static bool parsed = false;
+    if (!parsed) {
+        parsed = true;
+        if (const char *spec = std::getenv("ZEROTEAM_POKE_RAM")) {
+            const char *at = spec;
+            while (*at) {
+                unsigned address = 0, value = 0;
+                if (std::sscanf(at, "%x:%x", &address, &value) != 2) break;
+                pokes.push_back({address, value});
+                const char *next = std::strchr(at, ';');
+                if (!next) break;
+                at = next + 1;
+            }
+        }
+    }
+    if (!pokes.empty()) {
+        UINT8 *ram = zt_main_ram_ptr();
+        for (const Poke &poke : pokes) {
+            if (poke.address + 1 >= 0x20000) continue;
+            ram[poke.address] = poke.value & 0xff;
+            ram[poke.address + 1] = (poke.value >> 8) & 0xff;
+        }
+    }
     const unsigned players[2] = {p1, p2};
     // Ordered exactly like the field table above: coin, start, four directions,
     // then the two action buttons.
