@@ -10,9 +10,8 @@ são específicos deste título; a compilação usa a ROM do próprio jogador.
 
 O atalho **Zero Team USA** está na biblioteca da Steam. A instalação fica em
 `~/Games/ZeroTeam-Native` (NVMe interno; o cartão microSD estava somente
-leitura no dia da instalação). O jogo ocupa os 1920×1080 do Ally **sem
-esticar**: o renderizador passou a ler 428 colunas de mundo (as 320 do gabinete
-mais 54 de cada lado) e a frente estica essa imagem para a tela inteira.
+leitura no dia da instalação). O jogo apresenta a arena ampliada em tela cheia
+a 1920×1080. Os sprites conservam a proporção do gabinete.
 
 | Ação | ROG Ally | Teclado |
 |---|---|---|
@@ -77,42 +76,19 @@ usada](https://github.com/finalburnneo/FBNeo/tree/61cd3ede225ec44b84011f7679db68
 
 ## Campo de visão 16:9
 
-A placa desenha os tilemaps e os sprites de um mundo de 512 px e recortava tudo
-em 320 colunas. Para o campo 16:9 o recorte passou a 428 colunas e as camadas
-receberam um deslocamento de 54 px, então a janela mostra 54 px de mundo a mais
-de cada lado. A camada de texto fixa (placar, tempo, avisos) continua com as suas
-40 colunas centradas, e nada do miolo muda: o centro de 320 colunas da imagem
-16:9 é **byte a byte idêntico** ao quadro 4:3 do mesmo instante.
+A área de jogo tem 428×256 pixels de arcade e a saída tem 1920×1080. O mapa circular da placa guarda 32 colunas de tiles. Os dois formatos de mapa do jogo agora carregam até 28 colunas de 16 pixels, incluindo os tiles parcialmente visíveis nas bordas. A câmera acompanha a origem do trecho jogável no porto e na montanha. A sala fechada do dojo usa os dois vãos da parede para ampliar o salão com os tiles da própria fase.
 
-**Limite conhecido.** O mundo tem 512 px e o jogo escreve apenas a janela que o
-gabinete mostrava. No começo de cada fase, e nas telas fixas (título, seleção de
-personagem), as colunas extras podem cair fora da área desenhada do mapa e
-aparecer escuras; essas telas também são composições de 320 px, então ficam
-centralizadas com barras. Para o enquadramento original existe `--pillarbox`.
+Os limites laterais de movimento, as verificações de visibilidade, o descarte de objetos e a montagem dos sprites consideram a área ampliada. O título, a seleção de personagem e a tabela de recordes usam as texturas das bordas de seus próprios fundos. O texto, os retratos e os lutadores continuam em suas proporções originais. A opção `--pillarbox` recupera a janela e os limites de movimento do gabinete.
 
-## Verificação
+## Verificação no Ally
 
-O build compara duas placas construídas dos mesmos fontes com as mesmas opções:
-a traduzida e a de referência, que executa o interpretador do FBNeo. Elas
-recebem o mesmo roteiro de entradas e precisam coincidir em **todos** os quadros
-e blocos de áudio, não só no último:
+O teste da primeira luta segura o direcional e lê a posição do jogador enquanto ele encosta nas duas extremidades. Em coordenadas relativas à câmera do gabinete, o modo clássico atingiu 16 e 304. Em 16:9 o mesmo roteiro atingiu −38 e 358. Isso acrescenta 54 pixels jogáveis por lado. Para repetir depois da compilação, execute o comando abaixo na pasta do projeto.
 
-```text
-frames=1200 video=e18569259fdaa2c1/e18569259fdaa2c1
-             audio=0eafaed49d1d6063/0eafaed49d1d6063
-             capture=e5e436cfe863a8de/e5e436cfe863a8de sites=917504 fallback=0
-             => identical
+```sh
+python3 tools/verify_edges.py .work/build/libzeroteam_board.so .work/private/chips
 ```
 
-`fallback=0` significa que nenhuma instrução precisou ser interpretada: todo o
-programa executado passou pelo código traduzido.
-
-No ROG Ally com Bazzite, o atalho da Steam abriu o jogo em uma janela de
-1920×1080 com a saída também em 1920×1080, o SDL reconheceu o controle Xbox e o
-crédito e o start funcionaram. Uma medição de 30 s de jogo deu lógica a
-55,49 fps e apresentação a 60,03 fps, com 134 quadros repetidos e nenhum
-descartado. A tradução executou 3.000 quadros em 3,74 s na máquina de compilação
-(~800 quadros por segundo), muito acima da cadência necessária.
+A versão traduzida e a placa de referência coincidiram em vídeo e áudio durante 5.000 quadros com as mesmas entradas. A tradução registrou 917.504 endereços e nenhum recurso ao interpretador. As verificações visuais incluíram a primeira fase, o porto, a montanha, telas fixas e a composição do dojo com os mapas da ROM. Na execução isolada da versão final no Ally, a saída SDL mediu 1920×1080, com 55,43 atualizações de jogo e 59,86 apresentações por segundo em 1.250 quadros. O atalho da Steam também foi conferido no painel durante a revisão.
 
 O inventário do ZIP interno foi produzido pelo REA 6.10.1, evidência
 `ev_ab6170b4dcf68263617bfb00ac35e187e1a8d3b6176378b06b714623eea0b808`. A

@@ -19,3 +19,4 @@ frontend/zeroteam_board.h
 tools/prepare_chips.py
 tools/verify_board.py
 tools/probe.cpp
+tools/verify_edges.py

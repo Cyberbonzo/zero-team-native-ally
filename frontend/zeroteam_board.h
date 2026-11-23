@@ -27,6 +27,7 @@ enum {
 
 /* The board consumes extracted, CRC-verified chips from `directory`. */
 int zt_init(const char *directory);
+void zt_set_widescreen(int enabled);
 double zt_fps(void);
 /* XRGB8888, top to bottom, and interleaved 48 kHz signed stereo.
  * Return the stereo frame count, or a negative value on a board error. */

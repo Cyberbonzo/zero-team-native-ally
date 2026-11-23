@@ -43,6 +43,7 @@ python3 "$project/aot/generate.py" --fbneo "$vendor" --chips "$work/private/chip
 python3 "$project/board/build.py" --lib libzeroteam_board_ref.so
 python3 "$project/board/build.py" --aot
 python3 "$project/tools/verify_board.py" "$work/build" "$work/private/chips" 1200
+python3 "$project/tools/verify_edges.py" "$work/build/libzeroteam_board.so" "$work/private/chips"
 
 make -C "$project/frontend" BUILD="$work/build"
 

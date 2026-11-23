@@ -10,6 +10,7 @@
 #include "zeroteam_board.h"
 #pragma GCC visibility pop
 #include <array>
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -34,6 +35,70 @@ unsigned zt_aot_fallback(void) { return 0; }
 
 static std::unordered_map<uint32_t, std::vector<unsigned char>> chips;
 static bool active;
+static bool widescreen = true;
+int zt_render_offset = ZT_WIDE_MARGIN;
+int zt_left_extra = ZT_WIDE_MARGIN;
+int zt_right_extra = ZT_WIDE_MARGIN;
+
+void zt_set_widescreen(int enabled) {
+    if (!active) widescreen = enabled != 0;
+}
+
+// These are signed coordinate operands and object-lifetime table entries
+// in the verified USA program. Neither opcode dispatch nor chip files change.
+struct Bound { unsigned offset; int original; int side; };
+static constexpr Bound bounds[] = {
+    // A player and any object being carried use the same collision clamp.
+    {0xf053a, 304, 1}, {0xf053f, 304, 1},
+    {0xf0556, 16, -1}, {0xf055b, 16, -1},
+    // Camera-relative visibility test for moving objects.
+    {0xef258, -24, -1}, {0xef25d, 344, 1},
+    // Per-class disposal bounds. Empty classes retain their zero sentinel.
+    {0x83997, -256, -1}, {0x83999, 576, 1},
+    {0x8399b, -128, -1}, {0x8399d, 448, 1},
+    {0x8399f, -48, -1}, {0x839a1, 448, 1},
+    {0x839a3, -48, -1}, {0x839a5, 368, 1},
+    {0x839a7, -32, -1}, {0x839a9, 352, 1},
+    {0x839ab, -80, -1}, {0x839ad, 513, 1},
+    {0x839af, -32, -1}, {0x839b1, 352, 1},
+    {0x839b3, -32, -1}, {0x839b5, 352, 1},
+    {0x839bf, -48, -1}, {0x839c1, 448, 1},
+};
+
+static bool verify_coordinates(const UINT8 *rom) {
+    // Both the literal-column decoder and the compressed-column decoder.
+    if (rom[0x9068d] != 26 || rom[0x90724] != 26 ||
+        rom[0x90782] != 26 || rom[0x90977] != 26) return false;
+    for (const auto &b : bounds) {
+        if ((rom[b.offset] | rom[b.offset + 1] << 8) != uint16_t(b.original)) {
+            std::fprintf(stderr, "Unexpected USA viewport operand at %05x\n", b.offset);
+            return false;
+        }
+    }
+    return true;
+}
+
+// Requested by the mixer at the end of a tick. Near the map origin, look
+// into the level instead of revealing columns before the level started.
+void zt_update_view(const UINT8 *ram, UINT8 *rom) {
+    int left = ZT_WIDE_MARGIN;
+    const bool players = ram[0x8c0] || ram[0x9c0] || ram[0xac0] || ram[0xbc0];
+    if (widescreen && players) {
+        const int camera = int16_t(ram[0x918e] | ram[0x918f] << 8);
+        // The mountain map begins with eight non-playable columns before
+        // the first rock face and floor. These are part of the map itself.
+        const int origin = (ram[0x9c66] == 0x17 && ram[0x9c67] == 0) ? 128 : 0;
+        left = std::clamp(camera - origin, 0, int(ZT_WIDE_MARGIN));
+    }
+    zt_render_offset = left;
+    zt_left_extra = widescreen ? left : 0;
+    zt_right_extra = widescreen ? 2 * ZT_WIDE_MARGIN - left : 0;
+    for (const auto &b : bounds) {
+        const auto value = uint16_t(b.original + (b.side < 0 ? -zt_left_extra : zt_right_extra));
+        rom[b.offset] = uint8_t(value);
+        rom[b.offset + 1] = uint8_t(value >> 8);
+    }
+}
 
 namespace {
 enum Field { P1_COIN, P1_START, P1_UP, P1_DOWN, P1_LEFT, P1_RIGHT, P1_B1, P1_B2,
@@ -165,6 +230,20 @@ int zt_init(const char *directory) {
         std::ofstream out(std::getenv("ZEROTEAM_DUMP_ROM"), std::ios::binary);
         out.write(reinterpret_cast<const char *>(rom), 0x100000);
     }
+    if (!verify_coordinates(zt_main_rom_ptr())) {
+        BurnDrvZeroteam.Exit();
+        BurnExitMemoryManager();
+        BurnLibExit();
+        return -1;
+    }
+    if (widescreen) {
+        // Prefetch all 28 potentially visible columns at a fractional scroll.
+        // Keep four columns of history in the board's 32-column circular map.
+        UINT8 *rom = zt_main_rom_ptr();
+        rom[0x9068d] = rom[0x90724] = 28; // initial count
+        rom[0x90782] = rom[0x90977] = 27; // inclusive advancing column
+    }
+    zt_update_view(zt_main_ram_ptr(), zt_main_rom_ptr());
     active = true;
     return 0;
 }

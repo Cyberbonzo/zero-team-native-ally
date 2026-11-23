@@ -298,6 +298,7 @@ static int run(const Options &opt) {
     // bindings still work and SDL reports the pads it can see.
     if (!opt.headless && SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER) != 0)
         std::fprintf(stderr, "Game controllers unavailable: %s\n", SDL_GetError());
+    zt_set_widescreen(!opt.pillarbox);
     if (zt_init(opt.assets.c_str()) != 0) throw std::runtime_error("Board could not initialize the game");
     struct Board { ~Board() { zt_shutdown(); } } board;
     double fps = zt_fps();

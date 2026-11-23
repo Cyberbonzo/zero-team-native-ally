@@ -94,9 +94,8 @@ def patch_widescreen(code, margin=54):
     extra columns on both sides (320 + 2*54 = 428), and the fixed text layer
     kept to its original 40 columns so the HUD stays centred.
 
-    The shift is constant rather than clamped at the level edge: the game also
-    composes fixed 320-wide screens (title, character select) out of sprites, and
-    a centred shift keeps those centred. Clamping would leave them flush left.
+    Fixed panels keep their composition and use their own edge tiles to
+    extend only the backdrop. Gameplay uses the full scrolling playfield.
     """
     replacements = [
         # Surface allocation for the 32bpp composition buffer.
@@ -104,20 +103,91 @@ def patch_widescreen(code, margin=54):
          "Next += ZT_SCREEN_WIDTH * ZT_SCREEN_HEIGHT * sizeof(UINT32);"),
         # Tile layers: wrap the 512px world at the new left edge, then shift.
         ("if (sx < -15) sx += 512;",
-         f"if (sx < -15 - {margin}) sx += 512;\n\t\tsx += {margin};"),
+         "sx = ((sx + zt_render_offset + 15) & 0x1ff) - 15;"),
+        # The COP tests the object before the individual tiles reach the mixer.
+        ("INT16((VezReadLong(src+0x08) >> 16) - (sprite_prot_x)) & 0xffff",
+         "INT16((VezReadLong(src+0x08) >> 16) - sprite_prot_x)"),
+        ("x-w/2 > -w && x-w/2 < cop_spr_maxx+w",
+         "x-w/2 > -w-zt_left_extra && x-w/2 < cop_spr_maxx+w+zt_right_extra"),
+        ("static INT32 ZeroteamDraw() // sprite priorities different\n{",
+         "static INT32 ZeroteamDraw() // sprite priorities different\n{\n"
+         "\tzt_update_view(DrvMainRAM, DrvMainROM);"),
+        # The first list entry parks a dummy at (336,255), inside a wide view.
+        ("while( source >= sprites ){",
+         "while( source >= sprites ){\n"
+         "\t\tif ((source == sprites && source[0] == 0xffff && source[1] == 0x3fff"
+         " && source[2] == 336 && source[3] == 255) ||\n"
+         "\t\t    (source[0] == 0x8000 && source[1] == 0x8000"
+         " && source[2] == 0x8000 && source[3] == 0x8000)) {\n"
+         "\t\t\tif (source == sprites) break;\n\t\t\tsource -= 4;\n\t\t\tcontinue;\n\t\t}"),
         # Fixed text layer: keep the original 40 columns, centred in the view.
         ("INT32 sx = (offs & 0x3f) * 8;",
          f"if ((offs & 0x3f) >= 40) continue;\n"
          f"\t\tINT32 sx = ((offs & 0x3f) * 8) + {margin};"),
         # Sprites live in the same space as the tile maps and the fixed screens.
         ("if (sx < -15 || sy < -15 || sy >= nScreenHeight || sx >= nScreenWidth) return;",
-         f"sx += {margin};\n\tif (sx < -15 || sy < -15 || sy >= nScreenHeight ||"
+         "sx += zt_render_offset;\n\tif (sx < -15 || sy < -15 || sy >= nScreenHeight ||"
          f" sx >= nScreenWidth) return;"),
     ]
     for before, after in replacements:
         if code.count(before) != 1:
             raise SystemExit(f"unexpected driver source for widescreen patch: {before!r}")
         code = code.replace(before, after)
+    # Extend background material before sprite compositing. A panel's text,
+    # portraits and moving actors retain one position and their original size.
+    start = code.index("static void draw_layer(")
+    end = code.index("static void draw_txt_layer", start)
+    layer = code[start:end]
+    layer = layer.replace("void draw_layer(", "void draw_layer_span(")
+    layer = layer.replace("INT32 bank)", "INT32 bank, INT32 shift, INT32 lo, INT32 hi)")
+    layer = layer.replace("sx + zt_render_offset + 15", "sx + shift + 15")
+    layer = layer.replace("sx >= nScreenWidth) continue;", "sx >= hi || sx + 16 <= lo) continue;", 1)
+    pixel_clip = "if (sx < 0 || sx >= nScreenWidth) continue;"
+    if layer.count(pixel_clip) != 1:
+        raise ValueError("unexpected tile span clip")
+    layer = layer.replace(pixel_clip, "if (sx < lo || sx >= hi) continue;")
+    layer += """
+static void draw_layer(UINT8 *ram, INT32 scr, UINT32 color, INT32 bank)
+{
+    const INT32 margin = (nScreenWidth - 320) / 2;
+    const UINT16 bg = DrvMainRAM[0x9be2] | DrvMainRAM[0x9be3] << 8;
+    const UINT16 mg = DrvMainRAM[0x9c24] | DrvMainRAM[0x9c25] << 8;
+    const UINT16 fg = DrvMainRAM[0x9c66] | DrvMainRAM[0x9c67] << 8;
+    const bool panel = (mg == 0x31 && !fg && !bg) || (mg == 0x34 && fg == 0x35)
+                       || (bg == 0x15 && !mg && !fg);
+    if (bg == 3 && mg == 6 && fg == 4 && zt_left_extra) {
+        // The dojo ends with a closed, cabinet-width room at world X=688.
+        // Open up its two recessed doorways as the camera approaches. All
+        // actors are composited just once, in their actual playfield positions.
+        const INT32 camera = INT16(DrvMainRAM[0x918e] | DrvMainRAM[0x918f] << 8);
+        INT32 extra = camera - (688 - margin);
+        if (extra > 0) {
+            if (extra > margin) extra = margin;
+            draw_layer_span(ram, scr, color, bank, margin - extra, 0, 120);
+            draw_layer_span(ram, scr, color, bank, margin, 120, 308);
+            draw_layer_span(ram, scr, color, bank, margin + extra, 308, nScreenWidth);
+            return;
+        }
+    }
+    if (!panel || !zt_left_extra) {
+        draw_layer_span(ram, scr, color, bank, zt_render_offset, 0, nScreenWidth);
+        return;
+    }
+    draw_layer_span(ram, scr, color, bank, margin, margin, margin + 320);
+    // Use a 16-pixel band of each original edge. The width is one native tile,
+    // so tile boundaries and pixel aspect are continuous into the margins.
+    for (INT32 distance = 16; distance < margin + 16; distance += 16) {
+        const INT32 left = margin - distance;
+        const INT32 right = margin + 320 + distance - 16;
+        draw_layer_span(ram, scr, color, bank, margin - distance,
+                        left < 0 ? 0 : left, left + 16);
+        draw_layer_span(ram, scr, color, bank, margin + distance,
+                        right, right + 16 > nScreenWidth ? nScreenWidth : right + 16);
+    }
+}
+
+"""
+    code = code[:start] + layer + code[end:]
     # The driver's visible size drives GenericTilesInit and the composition
     # loops, so the single supported title is declared at the wider geometry.
     marker = "struct BurnDriver BurnDrvZeroteam = {"
@@ -149,6 +219,32 @@ def patch_scroll_trace(code):
                         "\t\t\tfprintf(stderr, \"SCR reg=%d val=%04x pc=%05x\\n\",\n"
                         "\t\t\t        offset & 0x0f, data, VezGetPC(-1) & 0xfffff);\n")
     return code
+
+
+def viewport_cpu(source):
+    """Adjust the two camera predicates that accept the actor's inset in DX."""
+    instructions = (SRC / "cpu/nec/necinstr.c").read_text()
+    anchor = "OP( 0x3b, i_cmp_r16w ) { DEF_r16w;"
+    if instructions.count(anchor) != 1:
+        raise ValueError("unexpected NEC register compare")
+    # At this point the core has read the two-byte CMP AX,DX. Only its flags
+    # are outputs: apply the margin to the comparison, never to the register.
+    tests = """
+    if (ModRM == 0xc2 && Sreg(PS) == 0xef27) {
+        const unsigned next = (Sreg(PS) << 4) + nec_state->ip;
+        if (next == 0xef4b4 || next == 0xef4da) src = UINT16(src - zt_left_extra);
+        if (next == 0xef4be || next == 0xef4e6) src = UINT16(src + zt_right_extra);
+    }
+"""
+    update(GEN / "zt_view_ops.inc", instructions.replace(anchor, anchor + tests))
+    code = source.read_text()
+    include = '#include "necinstr.c"'
+    if code.count(include) != 1:
+        raise ValueError("unexpected NEC instruction source")
+    out = GEN / ("viewport_" + source.name)
+    update(out, code.replace(include, 'extern int zt_left_extra, zt_right_extra;\n'
+                                      '#include "zt_view_ops.inc"'))
+    return out
 
 
 def patch_store_watch(code, address):
@@ -221,7 +317,9 @@ static const struct {const char *game_name; char *sourcefile;} sourcefile_table[
         driver = patch_store_watch(driver, int(args.watch_store, 16))
     geometry = (f"// Generated: geometry shared with frontend/zeroteam_board.h.\n"
                 f"#define ZT_SCREEN_WIDTH {width}\n#define ZT_SCREEN_HEIGHT {height}\n\n")
-    update(GEN / "d_raiden2.cpp", geometry + driver + """
+    viewport = ("extern int zt_render_offset, zt_left_extra, zt_right_extra;\n"
+                "extern void zt_update_view(const unsigned char *, unsigned char *);\n")
+    update(GEN / "d_raiden2.cpp", geometry + viewport + driver + """
 extern "C" UINT8 *zt_main_rom_ptr(void) { return DrvMainROM; }
 
 // Diagnostics used by the tools while investigating the camera and the sprite
@@ -242,13 +340,13 @@ ZT_EXPORT UINT8 *zt_main_ram_ptr(void) { return DrvMainRAM; }
         if not (GEN / "nec_aot.cpp").exists() or not (GEN / "zeroteam_sites.S").exists():
             parser.error("--aot needs build/generated/nec_aot.cpp; run aot/generate.py first")
         extra = ["-DZEROTEAM_AOT"]
-        sources.append(GEN / "nec_aot.cpp")
+        sources.append(viewport_cpu(GEN / "nec_aot.cpp"))
         # The V25 core is a separate translation unit with its own copy of the
         # shared 8086 opcodes; the Vez interface still needs it.
         sources.append(SRC / "cpu/nec/v25.cpp")
         objects_extra.append(assemble(GEN / "zeroteam_sites.S"))
     else:
-        sources += [SRC / s for s in CPU_FILES]
+        sources += [viewport_cpu(SRC / CPU_FILES[0]), SRC / CPU_FILES[1]]
 
     with concurrent.futures.ThreadPoolExecutor(8) as pool:
         objects = list(pool.map(lambda s: compile_object(s, extra), sources))
