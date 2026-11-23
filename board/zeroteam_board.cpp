@@ -39,6 +39,7 @@ static bool widescreen = true;
 int zt_render_offset = ZT_WIDE_MARGIN;
 int zt_left_extra = ZT_WIDE_MARGIN;
 int zt_right_extra = ZT_WIDE_MARGIN;
+int zt_backdrop_left, zt_backdrop_right;
 
 void zt_set_widescreen(int enabled) {
     if (!active) widescreen = enabled != 0;
@@ -82,13 +83,40 @@ static bool verify_coordinates(const UINT8 *rom) {
 // into the level instead of revealing columns before the level started.
 void zt_update_view(const UINT8 *ram, UINT8 *rom) {
     int left = ZT_WIDE_MARGIN;
+    zt_backdrop_left = zt_backdrop_right = 0;
     const bool players = ram[0x8c0] || ram[0x9c0] || ram[0xac0] || ram[0xbc0];
-    if (widescreen && players) {
+    if (widescreen) {
         const int camera = int16_t(ram[0x918e] | ram[0x918f] << 8);
         // The mountain map begins with eight non-playable columns before
         // the first rock face and floor. These are part of the map itself.
-        const int origin = (ram[0x9c66] == 0x17 && ram[0x9c67] == 0) ? 128 : 0;
-        left = std::clamp(camera - origin, 0, int(ZT_WIDE_MARGIN));
+        const int fg = ram[0x9c66] | ram[0x9c67] << 8;
+        const int mg = ram[0x9c24] | ram[0x9c25] << 8;
+        const bool castle = fg == 81 || fg == 84 || fg == 87 || fg == 90;
+        const int origin = (fg == 23 || fg == 41 || fg == 30 || castle) ? 128 : 0;
+        const int margin = ZT_WIDE_MARGIN;
+        if (mg == 20 || mg == 39 || fg == 81 || fg == 87 || fg == 98 ||
+            fg == 101 || mg == 93 || mg == 103 || mg == 56) {
+            zt_backdrop_left = zt_backdrop_right = margin;
+        } else if (fg == 84 || fg == 90 || fg == 28 || fg == 46) {
+            // Only extend the part of a margin outside the authored room.
+            // Between its first and last camera positions use actual tiles.
+            const int first = fg == 46 ? 64 : 128;
+            const int last = fg == 90 ? 400 : (fg == 28 ? 176 : 256);
+            zt_backdrop_left = std::clamp(first - camera + margin, 0, margin);
+            zt_backdrop_right = std::clamp(camera - last + margin, 0, margin);
+        } else if (players) {
+            left = std::clamp(camera - origin, 0, margin);
+        }
+        if (players && (fg == 10 || fg == 13 || fg == 17 || fg == 23 ||
+                        fg == 41 || fg == 30)) {
+            const int map_columns = ram[0x9c80] | ram[0x9c81] << 8;
+            int end = map_columns * 16;
+            // The mountain's tile stream includes padding past the building.
+            if (fg == 23) end = 1664 + 320;
+            if (end - origin >= ZT_WIDTH)
+                left = std::max(left, std::clamp(camera + ZT_WIDTH - end,
+                                                 0, 2 * margin));
+        }
     }
     zt_render_offset = left;
     zt_left_extra = widescreen ? left : 0;

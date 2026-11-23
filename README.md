@@ -97,5 +97,16 @@ imagem de programa montada pelo gerador tem SHA-256
 ao `DrvMainROM` que o driver monta em tempo de execução. O vetor de reset lido
 em `0xffff0` é `8000:00ea`.
 
-As demais fases, o modo de quatro jogadores e o segundo jogador ainda precisam
-de verificação individual.
+## Campanha completa em 16:9
+
+A revisão da campanha cobre as seis fases, seus chefes, os dois bônus, o resgate de helicóptero, a cerimônia e os créditos. No cais e na pedreira, o renderizador guarda as colunas originais que já passaram pela câmera. Assim a borda oposta do mapa não reaparece quando a rolagem termina. Nos salões do castelo, a câmera usa a extensão real da sala. Onde a pintura foi desenhada apenas para a largura do gabinete, as faixas externas reutilizam a borda do cenário. Os inimigos e efeitos são compostos depois, em suas coordenadas de jogo.
+
+O teste de regressão reproduz os comandos do jogador 1 desde a tela inicial. Ele usa créditos livres e repõe a energia no processo de teste para atravessar a campanha inteira. O atalho da Steam usa as regras normais. O arquivo de entradas contém a duração de cada comando em quadros e a máscara hexadecimal dos botões. A ferramenta confere as transições da campanha até os créditos e calcula assinaturas do áudio e de amostras de vídeo. Para repetir com os chips da edição USA, execute a partir da pasta do projeto.
+
+```sh
+python3 tools/verify_campaign.py .work/build/libzeroteam_board.so .work/private/chips
+```
+
+No Ally, as placas traduzida e de referência completaram os 26 marcos no mesmo quadro. O roteiro terminou após 187.028 quadros, já nos créditos. As assinaturas coincidiram em vídeo (`e5ac8577`, uma amostra a cada 60 quadros e em cada marco) e áudio (`bd3b153f`, todas as amostras). A tradução usou zero fallbacks. Em uma execução SDL separada de 600 quadros em tela virtual de 1920×1080, a lógica ficou em 55,47 Hz e a apresentação em 60,00 Hz, sem descarte.
+
+A verificação cobre um jogador. O modo cooperativo continua sem teste de campanha completa.

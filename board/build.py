@@ -107,8 +107,24 @@ def patch_widescreen(code, margin=54):
         # The COP tests the object before the individual tiles reach the mixer.
         ("INT16((VezReadLong(src+0x08) >> 16) - (sprite_prot_x)) & 0xffff",
          "INT16((VezReadLong(src+0x08) >> 16) - sprite_prot_x)"),
+        ("INT16((VezReadLong(src+0x04) >> 16) - (sprite_prot_y)) & 0xffff",
+         "INT16((VezReadLong(src+0x04) >> 16) - sprite_prot_y)"),
         ("x-w/2 > -w && x-w/2 < cop_spr_maxx+w",
          "x-w/2 > -w-zt_left_extra && x-w/2 < cop_spr_maxx+w+zt_right_extra"),
+        # Select the 9-bit wrap once for the whole sprite. A large boss
+        # crossing one side must not contribute individual tiles at the other.
+        ("xtlim += 1;\n\n\t\txstep", """xtlim += 1;
+        sx &= 0x1ff;
+        const INT32 right = nScreenWidth - zt_render_offset;
+        const INT32 left = -zt_render_offset;
+        const INT32 width = xtlim * 16;
+        const INT32 positive = (sx + width < right ? sx + width : right) - sx;
+        const INT32 wrapped = sx - 512;
+        const INT32 negative = wrapped + width - (wrapped > left ? wrapped : left);
+        if (negative > positive) sx = wrapped;
+
+        xstep"""),
+        ("(sx+xstep*xtiles)&0x1ff,", "sx+xstep*xtiles,"),
         ("static INT32 ZeroteamDraw() // sprite priorities different\n{",
          "static INT32 ZeroteamDraw() // sprite priorities different\n{\n"
          "\tzt_update_view(DrvMainRAM, DrvMainROM);"),
@@ -130,31 +146,89 @@ def patch_widescreen(code, margin=54):
          f" sx >= nScreenWidth) return;"),
     ]
     for before, after in replacements:
-        if code.count(before) != 1:
+        expected = 2 if before == "(sx+xstep*xtiles)&0x1ff," else 1
+        if code.count(before) != expected:
             raise SystemExit(f"unexpected driver source for widescreen patch: {before!r}")
         code = code.replace(before, after)
+    duplicate = [line for line in code.splitlines(keepends=True)
+                 if "draw_single_sprite(tile_number" in line and "((sx+xstep*xtiles)&0x1ff)-0x200" in line]
+    if len(duplicate) != 2:
+        raise ValueError("unexpected horizontal sprite wrap")
+    for line in duplicate:
+        code = code.replace(line, "")
     # Extend background material before sprite compositing. A panel's text,
     # portraits and moving actors retain one position and their original size.
     start = code.index("static void draw_layer(")
     end = code.index("static void draw_txt_layer", start)
     layer = code[start:end]
     layer = layer.replace("void draw_layer(", "void draw_layer_span(")
-    layer = layer.replace("INT32 bank)", "INT32 bank, INT32 shift, INT32 lo, INT32 hi)")
+    layer = layer.replace("INT32 bank)", "INT32 bank, INT32 shift, INT32 lo, INT32 hi, INT32 mirror = -1)")
     layer = layer.replace("sx + zt_render_offset + 15", "sx + shift + 15")
     layer = layer.replace("sx >= nScreenWidth) continue;", "sx >= hi || sx + 16 <= lo) continue;", 1)
     pixel_clip = "if (sx < 0 || sx >= nScreenWidth) continue;"
     if layer.count(pixel_clip) != 1:
         raise ValueError("unexpected tile span clip")
     layer = layer.replace(pixel_clip, "if (sx < lo || sx >= hi) continue;")
+    layer = layer.replace("INT32 pxl = gfx", "const INT32 outx = mirror < 0 ? sx : mirror - sx;\n"
+                          "\t\t\t\t\t\tINT32 pxl = gfx").replace("dst[sx]", "dst[outx]")
     layer += """
+// Keep the last native columns that scrolled out of view. The board reuses
+// their ring slots for prefetch before a 108-pixel look-back can finish.
+static UINT8 *wide_history(UINT8 *ram, INT32 scr, UINT16 map, UINT16 *composed)
+{
+    struct History {
+        UINT16 tiles[32 * 32];
+        bool valid[32];
+        UINT16 map;
+        INT32 scroll;
+    };
+    static History history[3] = {};
+    History &h = history[scr];
+    const INT32 x = (scroll[scr * 4] | scroll[scr * 4 + 1] << 8) & 511;
+    const INT32 delta = ((x - h.scroll + 256) & 511) - 256;
+    if (!map || map != h.map || delta < -16 || delta > 16) {
+        memset(h.valid, 0, sizeof(h.valid));
+    }
+    h.map = map;
+    h.scroll = x;
+    const INT32 col = x / 16;
+    const UINT16 *live = (UINT16 *)ram;
+    // One column per tick is enough when scrolling normally. At a new
+    // position there is no relevant history until these columns go past.
+    for (INT32 y = 0; y < 32; ++y) h.tiles[y * 32 + col] = live[y * 32 + col];
+    h.valid[col] = true;
+    if (zt_render_offset <= 54) return ram;
+    memcpy(composed, live, sizeof(h.tiles));
+    for (INT32 back = 4; back <= (zt_render_offset + 15) / 16; ++back) {
+        const INT32 prior = (col - back) & 31;
+        if (!h.valid[prior]) continue;
+        for (INT32 y = 0; y < 32; ++y)
+            composed[y * 32 + prior] = h.tiles[y * 32 + prior];
+    }
+    return (UINT8 *)composed;
+}
+
 static void draw_layer(UINT8 *ram, INT32 scr, UINT32 color, INT32 bank)
 {
     const INT32 margin = (nScreenWidth - 320) / 2;
     const UINT16 bg = DrvMainRAM[0x9be2] | DrvMainRAM[0x9be3] << 8;
     const UINT16 mg = DrvMainRAM[0x9c24] | DrvMainRAM[0x9c25] << 8;
     const UINT16 fg = DrvMainRAM[0x9c66] | DrvMainRAM[0x9c67] << 8;
+    UINT16 composed[32 * 32];
+    ram = wide_history(ram, scr, scr == 0 ? bg : (scr == 1 ? mg : fg), composed);
     const bool panel = (mg == 0x31 && !fg && !bg) || (mg == 0x34 && fg == 0x35)
                        || (bg == 0x15 && !mg && !fg);
+    // These composed scenes contain cabinet-width art. Reflect only the
+    // background pixels meeting the edge, before sprites and text are mixed.
+    if (zt_backdrop_left || zt_backdrop_right) {
+        const INT32 first = zt_backdrop_left;
+        const INT32 end = nScreenWidth - zt_backdrop_right;
+        draw_layer_span(ram, scr, color, bank, margin, first, end);
+        if (first) draw_layer_span(ram, scr, color, bank, margin, first, 2 * first, 2 * first - 1);
+        if (zt_backdrop_right) draw_layer_span(ram, scr, color, bank, margin,
+                                               end - zt_backdrop_right, end, 2 * end - 1);
+        return;
+    }
     if (bg == 3 && mg == 6 && fg == 4 && zt_left_extra) {
         // The dojo ends with a closed, cabinet-width room at world X=688.
         // Open up its two recessed doorways as the camera approaches. All
@@ -318,6 +392,7 @@ static const struct {const char *game_name; char *sourcefile;} sourcefile_table[
     geometry = (f"// Generated: geometry shared with frontend/zeroteam_board.h.\n"
                 f"#define ZT_SCREEN_WIDTH {width}\n#define ZT_SCREEN_HEIGHT {height}\n\n")
     viewport = ("extern int zt_render_offset, zt_left_extra, zt_right_extra;\n"
+                "extern int zt_backdrop_left, zt_backdrop_right;\n"
                 "extern void zt_update_view(const unsigned char *, unsigned char *);\n")
     update(GEN / "d_raiden2.cpp", geometry + viewport + driver + """
 extern "C" UINT8 *zt_main_rom_ptr(void) { return DrvMainROM; }

@@ -20,3 +20,5 @@ tools/prepare_chips.py
 tools/verify_board.py
 tools/probe.cpp
 tools/verify_edges.py
+tools/verify_campaign.py
+tools/campaign.inputs
